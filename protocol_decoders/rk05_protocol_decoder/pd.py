@@ -284,31 +284,41 @@ class Decoder(srd.Decoder):
             deadline = min((point for point in (read_end, write_end, next_read)
                             if point is not None), default=None)
             conditions = edges if deadline is None else edges + [{'skip': deadline - self.samplenum}]
-            pins = self.wait(conditions)
+            # Unpack the pin levels because AllLogic reuses the tuple on the next wait.
+            _, read_data, _, read_gate, write_gate = self.wait(conditions)
             sample = self.samplenum
-            events = {name for (name, _), matched in zip(watches, self.matched) if matched}
+            matched = self.matched
+            if isinstance(matched, int):
+                matched = tuple(matched & (1 << index) for index in range(len(watches)))
+            events = {name for (name, _), active in zip(watches, matched) if active}
 
             # A releasing gate can coincide with the last clock. Let its
             # delayed sample complete before closing the read burst.
-            read_open = READ_GATE not in self.mapped or pins[READ_GATE] == 0
+            read_open = READ_GATE not in self.mapped or read_gate == 0
             read_gate_edge = 'read gate' in events
-            if sample == read_end or (read_gate_edge and read_open):
-                read_sector.finish()
+            read_starting = read_gate_edge and read_open
+            if read_starting:
                 pending.clear()
+            # A timeout may arrive a sample late across AllLogic capture chunks.
+            while pending and pending[0][0] <= sample:
+                _, clock = pending.popleft()
+                read_sector.bit(clock, sample, 1 - read_data)
+            if read_starting or (read_end is not None and sample >= read_end):
+                read_sector.finish()
                 last_read = None
             if 'read' in events and (read_open or read_gate_edge):
-                pending.append((sample + delay, sample))
+                if delay:
+                    pending.append((sample + delay, sample))
+                else:
+                    read_sector.bit(sample, sample, 1 - read_data)
                 last_read = sample
-            if pending and pending[0][0] == sample:
-                _, clock = pending.popleft()
-                read_sector.bit(clock, sample, 1 - pins[READ_DATA])
             if not read_open and not pending and last_read is not None:
                 read_sector.finish()
                 last_read = None
 
-            write_open = WRITE_GATE not in self.mapped or pins[WRITE_GATE] == 0
+            write_open = WRITE_GATE not in self.mapped or write_gate == 0
             write_gate_edge = 'write gate' in events
-            if sample == write_end or (write_gate_edge and write_open):
+            if (write_end is not None and sample >= write_end) or (write_gate_edge and write_open):
                 self.end_write_burst()
             if 'write' in events and (write_open or write_gate_edge):
                 self.write_edge(sample)

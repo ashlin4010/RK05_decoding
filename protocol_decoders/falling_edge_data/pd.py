@@ -60,9 +60,12 @@ class Decoder(srd.Decoder):
 
             _, data = self.wait(conditions)
             sample = self.samplenum
-            if self.matched[0]:
+            # AllLogic returns a bitmask. PulseView returns a tuple.
+            matched = self.matched
+            clock_edge = (matched & 1) if isinstance(matched, int) else matched[0]
+            if clock_edge:
                 pending.append(sample + delay_samples)
 
-            if pending and pending[0] == sample:
+            while pending and pending[0] <= sample:
                 pending.popleft()
                 self.put(sample, sample, self.out_ann, [0, [str(data)]])
